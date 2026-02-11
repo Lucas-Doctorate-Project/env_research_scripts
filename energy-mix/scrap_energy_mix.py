@@ -15,9 +15,9 @@ end_date = start_date + timedelta(days=7)
 
 REGIONS = ["CTY|10YFR-RTE------C", "CTY|10YPL-AREA-----S", "CTY|10Y1001A1001A83F"]
 GRID_COMPOSITION_BY_REGION = {
-    "CTY|10YFR-RTE------C": "low_carbon",
-    "CTY|10YPL-AREA-----S": "high_carbon",
-    "CTY|10Y1001A1001A83F": "volatile_carbon"
+    "CTY|10YFR-RTE------C": "renewable_heavy",
+    "CTY|10YPL-AREA-----S": "fossil_heavy",
+    "CTY|10Y1001A1001A83F": "mixed"
 }
 
 
