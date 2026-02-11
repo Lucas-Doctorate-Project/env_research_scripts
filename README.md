@@ -8,5 +8,5 @@ This repository contains most files used for our experiments.
 
 - [ ] Add the platform file.
 - [ ] Add the workload files.
-- [ ] Add the intensity factors as a JSON file to be easily imported.
+- [X] Add the intensity factors as a JSON file that can be easily fetched.
 - [ ] Create the script to run the experiments.
