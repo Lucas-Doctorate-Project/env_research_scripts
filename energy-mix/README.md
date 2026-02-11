@@ -2,9 +2,17 @@
 
 This document describes the rationale for selecting countries and the temporal scope of historical energy generation records (by production type) from different countries.
 
+## How to Run the Script
+
+Basically, we're just using `requests` and `pandas` libraries. You can install the version of the packages we used by running `pip install -r requirements.txt`.
+
 ## Country Selection
 
-The countries chosen were France, Germany, and Poland. The reason behind these choices is the difference in their energy mixes.
+The countries chosen were France, Germany, and Poland. The reason behind these choices is the difference in their energy mixes. More info can be found in the following links:
+
+- https://en.wikipedia.org/wiki/Energy_in_France
+- https://en.wikipedia.org/wiki/Energy_in_Germany
+- https://en.wikipedia.org/wiki/Energy_in_Poland
 
 | Country | Energy Mix Profile | Rationale |
 | :--- | :--- | :--- |
