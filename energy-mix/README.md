@@ -25,3 +25,7 @@ The files corresponding to the extracted data for each country are `fossil_heavy
 ## Temporal Scope
 
 The records were collected from the European transparency platform. Data is recorded every 15 minutes. Seven-day periods (one week) were selected to capture daily variations in the energy mix and variability between weekdays (high industrial and environmental load) and weekends (load relief). The selected period spans from January 11 to January 17 (European winter). The choice is due to operational stress.
+
+# Observation
+
+We only update `master_host` since it will be the only host responsible for tracking the energy mix. It has to be the first host in the platform file (design choices).

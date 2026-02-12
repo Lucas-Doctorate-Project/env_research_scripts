@@ -20,7 +20,6 @@ GRID_COMPOSITION_BY_REGION = {
     "CTY|10Y1001A1001A83F": "mixed"
 }
 
-
 def get_sources_map():
     info_response = requests.post(entsoe_info_url, data='{"attributeList":[{"useCase":"generation/installed/perType","code":"PRODUCTION_TYPE","strict":false}]}', headers=headers)
     info_data = info_response.json().get("enumList", [])
@@ -96,7 +95,7 @@ def export_energy_data(energy_values_by_region: dict[str, dict[str, list[float]]
         for _, row in percentage_df.iterrows():
             rows.append({
                 "timestamp": int(row['timestamp']),
-                "host_id": f"{GRID_COMPOSITION_BY_REGION[region]}_host",
+                "host_id": "master_host",
                 "property_name": "energy_mix",
                 "new_value": format_df_row_into_energy_mix_str(row)
             })
