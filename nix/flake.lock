@@ -7,11 +7,11 @@
         "nixpkgs": "nixpkgs"
       },
       "locked": {
-        "lastModified": 1782076378,
-        "narHash": "sha256-sjhuACkPytf1jUUnBUxUmFS9o8MVnZ0foB3Bo23az1w=",
+        "lastModified": 1787163489,
+        "narHash": "sha256-w07QB50ngac+90irNEv6z765QbMvopzfr3CMA66L0lc=",
         "owner": "Lucas-Doctorate-Project",
         "repo": "batsched",
-        "rev": "db245f37010e2c32df2dd6c62efefd90df59b469",
+        "rev": "f5baed759557670694691a7d0d8df59125c83f47",
         "type": "github"
       },
       "original": {
@@ -28,11 +28,11 @@
         "simgrid": "simgrid"
       },
       "locked": {
-        "lastModified": 1782075464,
-        "narHash": "sha256-sUkd0kIY3DYlN1YCcBKy1x1UB0YRB7zp5lSrS5ixZPM=",
+        "lastModified": 1784946558,
+        "narHash": "sha256-1itBtBIJyQxHktDv0L1cyWeqMctjyDkFV9oP9h1g6dE=",
         "owner": "Lucas-Doctorate-Project",
         "repo": "batsim",
-        "rev": "24b86a6d15cd4882290322b799e221cdcf4315fe",
+        "rev": "389cff5829b7a1cd653f8ca8aa78a77d3015d04c",
         "type": "github"
       },
       "original": {
@@ -120,11 +120,11 @@
         "nixpkgs-lib": "nixpkgs-lib_4"
       },
       "locked": {
-        "lastModified": 1778716662,
-        "narHash": "sha256-m1Yf0wZ8j1OHjTc2UwHwyQRSnNeSgLJOd7q5Y45hzi4=",
+        "lastModified": 1788450739,
+        "narHash": "sha256-glZLQlzIn1fXH6PazR2iUmTo7kzzyYSshrWhLS9TqCU=",
         "owner": "hercules-ci",
         "repo": "flake-parts",
-        "rev": "f7c1a2d347e4c52d5fb8d10cb4d94b5884e546fb",
+        "rev": "31729ca8cbdb4fa927b34e5f4353e6a83f39e993",
         "type": "github"
       },
       "original": {
@@ -248,11 +248,11 @@
     },
     "nixpkgs-lib_4": {
       "locked": {
-        "lastModified": 1777168982,
-        "narHash": "sha256-GOkGPcboWE9BmGCRMLX3worL4EMnsnG8MyKmXNeYuhQ=",
+        "lastModified": 1788057806,
+        "narHash": "sha256-DTQSMxzDWmT0zhguthvegnVkn7CFqGCv4IHCzk5ZUpM=",
         "owner": "nix-community",
         "repo": "nixpkgs.lib",
-        "rev": "f5901329dade4a6ea039af1433fb087bd9c1fe14",
+        "rev": "596e2e3940e09b2abbeb03f75fa1828c57fcd72c",
         "type": "github"
       },
       "original": {
@@ -311,11 +311,11 @@
     },
     "nixpkgs_5": {
       "locked": {
-        "lastModified": 1781074563,
-        "narHash": "sha256-md8WlXOlfnIeHeOScMTTHFyf2d6iaTwPl2apR5EQ3P4=",
+        "lastModified": 1788614874,
+        "narHash": "sha256-7QYjT2vHLuX9Z1pdxHXDKCbh1CR3D/2rywB9Tx0MPRg=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "9ae611a455b90cf061d8f332b977e387bda8e1ca",
+        "rev": "c043004d1c6985732bcc1cbc5a9c9aecbbb4e0f0",
         "type": "github"
       },
       "original": {
@@ -369,11 +369,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1782074725,
-        "narHash": "sha256-5mvIu9dw2gxGbvwnIIEmj+50ZC4LlLNXen8bc1x5JTU=",
+        "lastModified": 1784943028,
+        "narHash": "sha256-kOPeVPq21z0H3YeyIgHDf8TFsoirrrPiYkU1Xk3VxNI=",
         "owner": "Lucas-Doctorate-Project",
         "repo": "simgrid",
-        "rev": "618da389c89d8e66f7b89af3eec089c6e1bbff99",
+        "rev": "288b569340f79202e34d690438e0c411bce7a3d5",
         "type": "github"
       },
       "original": {
