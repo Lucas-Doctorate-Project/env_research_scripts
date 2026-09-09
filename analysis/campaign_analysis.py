@@ -1,7 +1,15 @@
-"""Shared loading, metrics, and plotting for the greenfilling trade-off notebook.
+"""Shared loading, metrics, and plotting for the green-window campaign notebooks.
 
-`greenfilling_tradeoffs.ipynb` imports this module for loading the campaign,
+`green_window_scheduling.ipynb` imports this module for loading the campaign,
 computing per-window paired deltas versus the EASY baseline, and plotting.
+
+The green scheduler is swept over two axes, an intensity `signal` (carbon or
+water) and a `planning horizon` (how far ahead it may look for a greener window
+to displace a job into). A `variant` folds both together, so each (signal,
+horizon) pair pairs against the same EASY baseline through one code path.
+
+The older two-variant `greenfilling_{carbon,water}` naming is still parsed, so a
+campaign TOML describing that campaign keeps loading.
 """
 
 from pathlib import Path
@@ -21,12 +29,15 @@ from matplotlib.markers import MarkerStyle
 # do not dominate the comparison: max(turnaround / max(execution, floor), 1).
 BOUNDED_SLOWDOWN_FLOOR_SECONDS = 10.0
 JOULES_PER_KWH = 3_600_000.0
+SECONDS_PER_DAY = 86_400.0
 IEEE_DOUBLE_COLUMN_WIDTH_INCHES = 7.16
 IEEE_MAX_FIGURE_HEIGHT_INCHES = 8.8
 IEEE_LINE_ART_DPI = 600
-BOX_FIGURE_SIZE = (IEEE_DOUBLE_COLUMN_WIDTH_INCHES, 2.75)
+BOX_FIGURE_SIZE = (IEEE_DOUBLE_COLUMN_WIDTH_INCHES, 5.0)
 TRADEOFF_FIGURE_SIZE = (IEEE_DOUBLE_COLUMN_WIDTH_INCHES, 8.6)
 SWING_FIGURE_SIZE = (IEEE_DOUBLE_COLUMN_WIDTH_INCHES, 3.35)
+TREND_FIGURE_SIZE = (IEEE_DOUBLE_COLUMN_WIDTH_INCHES, 4.6)
+COVERAGE_FIGURE_SIZE = (IEEE_DOUBLE_COLUMN_WIDTH_INCHES, 2.9)
 DATA_MARKER_SIZE = 4.0
 LEGEND_MARKER_SIZE = 4.5
 BOX_POINT_AREA = 7.0
@@ -35,6 +46,7 @@ METADATA_COLUMNS = [
     "name",
     "variant",
     "objective",
+    "horizon_seconds",
     "workload_label",
     "dataset",
     "regime",
@@ -44,7 +56,7 @@ METADATA_COLUMNS = [
 
 # Paired-delta columns reported in the summary table and per-window head.
 DELTA_COLUMNS = [
-    "greenfilling_variant",
+    "green_variant",
     "total_carbon_footprint_delta_pct",
     "total_water_footprint_delta_pct",
     "consumed_energy_kwh_delta_pct",
@@ -56,48 +68,109 @@ DELTA_COLUMNS = [
     "replay_mean_bounded_slowdown_delta_pct",
 ]
 
+# The delta whose sign answers "did the scheduler hit its own target", per signal.
+TARGET_DELTA_COLUMN = {
+    "carbon": "total_carbon_footprint_delta_pct",
+    "water": "total_water_footprint_delta_pct",
+}
+TARGET_INTENSITY_COLUMN = {
+    "carbon": "energy_weighted_carbon_intensity_delta_pct",
+    "water": "energy_weighted_water_intensity_delta_pct",
+}
+SWING_COLUMN = {"carbon": "swing_carbon", "water": "swing_water"}
+
 
 # --- Parsing -----------------------------------------------------------------
 
+GREEN_WINDOW_NAME_RE = re.compile(
+    r"green_window_scheduling_(?P<objective>carbon|water)_(?P<horizon>\d+)"
+    r"_(?P<dataset>[^_]+)_(?P<regime>[^_]+)"
+    r"_(?P<zone>[A-Z]{2})_(?P<start_date>\d{4}-\d{2}-\d{2})"
+)
+GREENFILLING_NAME_RE = re.compile(
+    r"greenfilling_(?P<objective>carbon|water)"
+    r"_(?P<dataset>[^_]+)_(?P<regime>[^_]+)"
+    r"_(?P<zone>[A-Z]{2})_(?P<start_date>\d{4}-\d{2}-\d{2})"
+)
+BASELINE_NAME_RE = re.compile(
+    r"easy_bf_(?P<dataset>[^_]+)_(?P<regime>[^_]+)"
+    r"_(?P<zone>[A-Z]{2})_(?P<start_date>\d{4}-\d{2}-\d{2})"
+)
+
+
 def parse_experiment_name(name):
-    """Split an experiment name into its variant/objective/workload/zone/date.
+    """Split an experiment name into its variant/objective/horizon/workload/window.
 
     The workload is a (dataset, regime) pair, e.g. `mustang_slack`. It is kept
     combined in `workload_label` so each dataset pairs against its own EASY
     baseline, and also split into `dataset` and `regime` for slicing.
+
+    `horizon_seconds` is the green scheduler's planning horizon, and is <NA> for
+    variants that have no horizon axis (the baseline and the old greenfilling
+    runs).
     """
-    baseline = re.fullmatch(
-        r"easy_bf_([^_]+)_([^_]+)_([A-Z]{2})_(\d{4}-\d{2}-\d{2})", name
-    )
+    green_window = GREEN_WINDOW_NAME_RE.fullmatch(name)
+    if green_window:
+        parts = green_window.groupdict()
+        horizon = int(parts["horizon"])
+        return {
+            "variant": f"green_window_scheduling_{parts['objective']}_{horizon}",
+            "objective": parts["objective"],
+            "horizon_seconds": horizon,
+            "workload_label": f"{parts['dataset']}_{parts['regime']}",
+            "dataset": parts["dataset"],
+            "regime": parts["regime"],
+            "zone": parts["zone"],
+            "start_date": parts["start_date"],
+        }
+
+    greenfilling = GREENFILLING_NAME_RE.fullmatch(name)
+    if greenfilling:
+        parts = greenfilling.groupdict()
+        return {
+            "variant": f"greenfilling_{parts['objective']}",
+            "objective": parts["objective"],
+            "horizon_seconds": pd.NA,
+            "workload_label": f"{parts['dataset']}_{parts['regime']}",
+            "dataset": parts["dataset"],
+            "regime": parts["regime"],
+            "zone": parts["zone"],
+            "start_date": parts["start_date"],
+        }
+
+    baseline = BASELINE_NAME_RE.fullmatch(name)
     if baseline:
-        dataset, regime, zone, start_date = baseline.groups()
+        parts = baseline.groupdict()
         return {
             "variant": "easy_bf",
             "objective": "baseline",
-            "workload_label": f"{dataset}_{regime}",
-            "dataset": dataset,
-            "regime": regime,
-            "zone": zone,
-            "start_date": start_date,
-        }
-
-    greenfilling = re.fullmatch(
-        r"greenfilling_(carbon|water)_([^_]+)_([^_]+)_([A-Z]{2})_(\d{4}-\d{2}-\d{2})",
-        name,
-    )
-    if greenfilling:
-        objective, dataset, regime, zone, start_date = greenfilling.groups()
-        return {
-            "variant": f"greenfilling_{objective}",
-            "objective": objective,
-            "workload_label": f"{dataset}_{regime}",
-            "dataset": dataset,
-            "regime": regime,
-            "zone": zone,
-            "start_date": start_date,
+            "horizon_seconds": pd.NA,
+            "workload_label": f"{parts['dataset']}_{parts['regime']}",
+            "dataset": parts["dataset"],
+            "regime": parts["regime"],
+            "zone": parts["zone"],
+            "start_date": parts["start_date"],
         }
 
     raise ValueError(f"Unexpected experiment name: {name}")
+
+
+def green_variants(metrics, baseline_variant="easy_bf"):
+    """Every non-baseline variant present, ordered by signal then horizon."""
+    variants = [
+        variant
+        for variant in metrics["variant"].unique()
+        if variant != baseline_variant
+    ]
+
+    def sort_key(variant):
+        match = re.search(r"_(carbon|water)(?:_(\d+))?$", variant)
+        if not match:
+            return (2, variant, 0)
+        signal, horizon = match.groups()
+        return (0 if signal == "carbon" else 1, "", int(horizon or 0))
+
+    return sorted(variants, key=sort_key)
 
 
 # --- Loading -----------------------------------------------------------------
@@ -203,6 +276,96 @@ def load_results(campaign, result_files, out_dir, windows):
     return schedules, jobs
 
 
+# --- Trace coverage ----------------------------------------------------------
+
+def trace_extent(windows, intensities_dir):
+    """Per window: when the intensity trace ends, and its last vs mean intensity.
+
+    Batsim holds the last trace sample for the rest of the simulation, so any
+    footprint accrued past `trace_end_seconds` is priced at a frozen intensity.
+    A schedule that runs well past the window is therefore not being scored
+    against a real signal, which is what `trace_coverage` measures.
+    """
+    rows = []
+    for window in windows.itertuples(index=False):
+        trace = pd.read_csv(Path(intensities_dir) / window.file)
+        carbon = trace[trace["property"].eq("carbon_intensity")].sort_values("timestamp")
+        water = trace[trace["property"].eq("water_intensity")].sort_values("timestamp")
+        rows.append(
+            {
+                "zone": window.zone,
+                "start_date": window.start_date,
+                "trace_end_seconds": carbon["timestamp"].max(),
+                "last_carbon_intensity": carbon["value"].iloc[-1],
+                "last_water_intensity": water["value"].iloc[-1],
+                "mean_carbon_intensity": carbon["value"].mean(),
+                "mean_water_intensity": water["value"].mean(),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def trace_coverage(run_metrics, out_dir, extent):
+    """Per run: how much footprint is accrued after the intensity trace ends.
+
+    A run whose makespan exceeds the trace is not scored against a real signal,
+    and its footprint numbers cannot be recovered by re-weighting them after the
+    fact: the schedule itself was chosen against a signal that stopped varying.
+    Such runs are rejected by `invalid_footprint_runs`, not corrected.
+    """
+    extent = extent.set_index(["zone", "start_date"])
+    rows = []
+    for run in run_metrics.itertuples(index=False):
+        window = extent.loc[(run.zone, run.start_date)]
+        footprint = pd.read_csv(
+            Path(out_dir) / run.name / "out_environmental_footprint.csv"
+        )
+        footprint = footprint.drop_duplicates(subset="time", keep="last").sort_values(
+            "time"
+        )
+        inside = footprint[footprint["time"] <= window["trace_end_seconds"]]
+        carbon_inside = (
+            inside["carbon_operational(gCO2e)"].iloc[-1] if len(inside) else 0.0
+        )
+        water_inside = inside["water_offsite(L)"].iloc[-1] if len(inside) else 0.0
+        carbon_total = footprint["carbon_operational(gCO2e)"].iloc[-1]
+        water_total = footprint["water_offsite(L)"].iloc[-1]
+
+        rows.append(
+            {
+                "name": run.name,
+                "variant": run.variant,
+                "workload_label": run.workload_label,
+                "zone": run.zone,
+                "start_date": run.start_date,
+                "trace_end_seconds": window["trace_end_seconds"],
+                "makespan": run.makespan,
+                "makespan_over_trace": run.makespan / window["trace_end_seconds"],
+                "tail_carbon_share_pct": (carbon_total - carbon_inside)
+                / carbon_total
+                * 100,
+                "tail_water_share_pct": (water_total - water_inside) / water_total * 100,
+                "footprint_is_valid": run.makespan <= window["trace_end_seconds"],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def summarize_trace_coverage(coverage):
+    """Per variant: how far past the trace each schedule runs, and the tail share."""
+    return (
+        coverage.groupby("variant")
+        .agg(
+            runs=("name", "size"),
+            median_makespan_over_trace=("makespan_over_trace", "median"),
+            max_makespan_over_trace=("makespan_over_trace", "max"),
+            median_tail_carbon_share_pct=("tail_carbon_share_pct", "median"),
+            max_tail_carbon_share_pct=("tail_carbon_share_pct", "max"),
+        )
+        .round(2)
+    )
+
+
 # --- Metrics -----------------------------------------------------------------
 
 def build_job_metrics(jobs):
@@ -235,8 +398,29 @@ def summarize_job_metrics(job_metrics):
     )
 
 
-def build_run_metrics(schedules, job_metrics):
-    """One row per experiment: schedule aggregates joined with replay job metrics."""
+def build_energy_decomposition(jobs):
+    """Per run: the energy and footprint that running jobs account for.
+
+    The schedule totals cover the whole platform, so subtracting these leaves
+    the idle part. Splitting the two matters because displacement moves compute
+    out of dirty hours and, by the same action, leaves idle sitting in them.
+    """
+    return (
+        jobs.groupby("name", observed=True)
+        .agg(
+            compute_joules=("consumed_energy", "sum"),
+            compute_carbon=("consumed_carbon", "sum"),
+            compute_water=("consumed_water", "sum"),
+        )
+        .reset_index()
+    )
+
+
+def build_run_metrics(schedules, job_metrics, jobs=None):
+    """One row per experiment: schedule aggregates joined with replay job metrics.
+
+    Passing `jobs` adds the compute/idle split of energy and footprint.
+    """
     replay_metrics = (
         job_metrics[job_metrics["job_kind"].eq("replay")]
         .drop(columns=["job_kind"])
@@ -253,7 +437,11 @@ def build_run_metrics(schedules, job_metrics):
     schedule_columns = [
         "name",
         "variant",
+        "objective",
+        "horizon_seconds",
         "workload_label",
+        "dataset",
+        "regime",
         "zone",
         "start_date",
         "season",
@@ -265,6 +453,10 @@ def build_run_metrics(schedules, job_metrics):
         "total_water_offsite",
         "consumed_joules",
         "makespan",
+        "time_computing",
+        "time_idle",
+        "nb_computing_machines",
+        "nb_jobs",
     ]
 
     schedule_metrics = schedules[schedule_columns].copy()
@@ -282,6 +474,40 @@ def build_run_metrics(schedules, job_metrics):
         schedule_metrics["total_water_offsite"]
         / schedule_metrics["consumed_energy_kwh"]
     )
+    # Nodes are never powered down in this platform, so idle time is pure loss.
+    schedule_metrics["idle_time_share"] = schedule_metrics["time_idle"] / (
+        schedule_metrics["time_idle"] + schedule_metrics["time_computing"]
+    )
+    # Share of the platform actually doing work over the run. A scheduler that
+    # holds the cluster to wait for a greener window shows up here immediately.
+    schedule_metrics["node_utilisation"] = schedule_metrics["time_computing"] / (
+        schedule_metrics["makespan"] * schedule_metrics["nb_computing_machines"]
+    )
+
+    if jobs is not None:
+        schedule_metrics = schedule_metrics.merge(
+            build_energy_decomposition(jobs), on="name", validate="one_to_one"
+        )
+        compute_kwh = schedule_metrics["compute_joules"] / JOULES_PER_KWH
+        idle_kwh = schedule_metrics["consumed_energy_kwh"] - compute_kwh
+        if idle_kwh.le(0).any():
+            raise ValueError("Idle energy must be positive for every experiment")
+
+        schedule_metrics["compute_energy_kwh"] = compute_kwh
+        schedule_metrics["idle_energy_kwh"] = idle_kwh
+        schedule_metrics["compute_energy_share"] = (
+            compute_kwh / schedule_metrics["consumed_energy_kwh"]
+        )
+        for signal, total, compute in [
+            ("carbon", "total_carbon_operational", "compute_carbon"),
+            ("water", "total_water_offsite", "compute_water"),
+        ]:
+            schedule_metrics[f"compute_{signal}_intensity"] = (
+                schedule_metrics[compute] / compute_kwh
+            )
+            schedule_metrics[f"idle_{signal}_intensity"] = (
+                schedule_metrics[total] - schedule_metrics[compute]
+            ) / idle_kwh
 
     return schedule_metrics.merge(
         replay_metrics,
@@ -291,98 +517,253 @@ def build_run_metrics(schedules, job_metrics):
     )
 
 
-def paired_deltas(metrics, greenfilling_variant, baseline_variant="easy_bf"):
-    """Per-window deltas of one greenfilling variant against EASY in the same window."""
+def build_deferral_diagnostics(jobs, run_metrics):
+    """Per run: how job waiting times compare with the scheduler's own horizon.
+
+    The planning horizon is meant to bound how far a job may be displaced. If
+    most jobs wait far longer than it, the bound is not holding and the campaign
+    is measuring a runaway scheduler rather than a green-scheduling policy.
+    """
+    horizons = run_metrics.set_index("name")["horizon_seconds"]
+    replay = jobs[jobs["job_kind"].eq("replay")]
+
+    rows = []
+    for name, group in replay.groupby("name", observed=True):
+        horizon = horizons.get(name, pd.NA)
+        waiting = group["waiting_time"]
+        row = {
+            "name": name,
+            "horizon_seconds": horizon,
+            "median_waiting_time": waiting.median(),
+            "max_waiting_time": waiting.max(),
+        }
+        if pd.notna(horizon):
+            row["over_horizon_pct"] = waiting.gt(horizon).mean() * 100
+            row["over_10x_horizon_pct"] = waiting.gt(10 * float(horizon)).mean() * 100
+            row["median_waiting_over_horizon"] = waiting.median() / float(horizon)
+        rows.append(row)
+
+    diagnostics = pd.DataFrame(rows)
+    return diagnostics.merge(
+        run_metrics[["name", "variant", "workload_label", "zone", "start_date"]],
+        on="name",
+    )
+
+
+def summarize_deferral(diagnostics):
+    """Per variant: is the planning horizon actually bounding displacement?"""
+    green = diagnostics[diagnostics["horizon_seconds"].notna()]
+    return (
+        green.groupby("variant")
+        .agg(
+            runs=("name", "size"),
+            median_over_horizon_pct=("over_horizon_pct", "median"),
+            median_over_10x_horizon_pct=("over_10x_horizon_pct", "median"),
+            median_waiting_over_horizon=("median_waiting_over_horizon", "median"),
+        )
+        .round(2)
+    )
+
+PERCENT_DELTA_METRICS = [
+    "total_carbon_footprint",
+    "total_water_footprint",
+    "consumed_energy_kwh",
+    "energy_weighted_carbon_intensity",
+    "energy_weighted_water_intensity",
+    "compute_carbon_intensity",
+    "idle_carbon_intensity",
+    "compute_water_intensity",
+    "idle_water_intensity",
+    "makespan",
+    "replay_p95_waiting_time",
+    "replay_mean_bounded_slowdown",
+    "node_utilisation",
+]
+
+# One convention for the whole module: every `*_improvement_pct` column is a
+# percentage against EASY in the same window where POSITIVE MEANS GREEN IS
+# BETTER. For everything except utilisation that is the negated delta, because
+# lower footprint, energy, makespan, waiting and slowdown are all better.
+# `signal` picks carbon or water, so the same column answers both campaigns.
+LOWER_IS_BETTER = {
+    "energy": "consumed_energy_kwh",
+    "makespan": "makespan",
+    "waiting": "replay_p95_waiting_time",
+    "slowdown": "replay_mean_bounded_slowdown",
+}
+SIGNAL_METRICS = {
+    "footprint": "total_{signal}_footprint",
+    "platform_intensity": "energy_weighted_{signal}_intensity",
+    "compute_intensity": "compute_{signal}_intensity",
+    "idle_intensity": "idle_{signal}_intensity",
+}
+
+# The headline set, in reading order: did it help, where did the carbon go,
+# what did it cost.
+IMPROVEMENT_COLUMNS = [
+    "footprint_improvement_pct",
+    "compute_intensity_improvement_pct",
+    "idle_intensity_improvement_pct",
+    "platform_intensity_improvement_pct",
+    "energy_improvement_pct",
+    "makespan_improvement_pct",
+    "waiting_improvement_pct",
+    "slowdown_improvement_pct",
+    "utilisation_improvement_pct",
+]
+
+
+def paired_deltas(metrics, green_variant, baseline_variant="easy_bf"):
+    """Per-window comparison of one green variant against EASY in the same window.
+
+    Returns the raw `*_delta_pct` columns plus the standardized
+    `*_improvement_pct` columns, where positive always means green won.
+    """
     keys = ["workload_label", "zone", "start_date"]
-    green = metrics[metrics["variant"].eq(greenfilling_variant)].copy()
+    green = metrics[metrics["variant"].eq(green_variant)].copy()
     baseline = metrics[metrics["variant"].eq(baseline_variant)].copy()
 
     paired = green.merge(
         baseline,
         on=keys,
-        suffixes=("_greenfilling", "_baseline"),
+        suffixes=("_green", "_baseline"),
         validate="one_to_one",
     )
-    paired["greenfilling_variant"] = greenfilling_variant
+    paired["green_variant"] = green_variant
     paired["baseline_variant"] = baseline_variant
-    for column in ["season", "swing_carbon", "swing_water"]:
-        paired[column] = paired[f"{column}_greenfilling"]
+    # Window and green-side attributes that describe the pair as a whole.
+    for column in [
+        "season",
+        "swing_carbon",
+        "swing_water",
+        "objective",
+        "horizon_seconds",
+        "dataset",
+        "regime",
+    ]:
+        paired[column] = paired[f"{column}_green"]
+    paired["signal"] = paired["objective"]
+    paired["horizon_hours"] = (
+        pd.to_numeric(paired["horizon_seconds"], errors="coerce") / 3600
+    )
 
-    percent_metrics = [
-        "total_carbon_footprint",
-        "total_water_footprint",
-        "consumed_energy_kwh",
-        "energy_weighted_carbon_intensity",
-        "energy_weighted_water_intensity",
-        "makespan",
-        "replay_p95_waiting_time",
-        "replay_mean_bounded_slowdown",
-    ]
-    for metric in percent_metrics:
+    for metric in PERCENT_DELTA_METRICS:
+        if f"{metric}_green" not in paired.columns:
+            continue
         paired[f"{metric}_delta_pct"] = (
-            (paired[f"{metric}_greenfilling"] - paired[f"{metric}_baseline"])
+            (paired[f"{metric}_green"] - paired[f"{metric}_baseline"])
             / paired[f"{metric}_baseline"]
             * 100
         )
 
     paired["replay_median_waiting_time_delta_seconds"] = (
-        paired["replay_median_waiting_time_greenfilling"]
+        paired["replay_median_waiting_time_green"]
         - paired["replay_median_waiting_time_baseline"]
+    )
+
+    for name, metric in LOWER_IS_BETTER.items():
+        paired[f"{name}_improvement_pct"] = -paired[f"{metric}_delta_pct"]
+    # Utilisation is the one metric where more is better.
+    paired["utilisation_improvement_pct"] = paired["node_utilisation_delta_pct"]
+
+    is_carbon = paired["signal"].eq("carbon")
+    for name, template in SIGNAL_METRICS.items():
+        carbon = template.format(signal="carbon") + "_delta_pct"
+        water = template.format(signal="water") + "_delta_pct"
+        if carbon not in paired.columns:
+            continue
+        paired[f"{name}_improvement_pct"] = -np.where(
+            is_carbon, paired[carbon], paired[water]
+        )
+
+    paired["target_swing"] = np.where(
+        is_carbon, paired["swing_carbon"], paired["swing_water"]
     )
 
     return paired
 
 
-def build_paired_comparisons(run_metrics):
-    """Paired deltas for both greenfilling objectives, stacked."""
+def build_paired_comparisons(run_metrics, baseline_variant="easy_bf"):
+    """Paired deltas for every green variant present, stacked.
+
+    Variants are discovered from the data, so adding a signal or a planning
+    horizon to the campaign needs no change here.
+    """
     return pd.concat(
         [
-            paired_deltas(run_metrics, greenfilling_variant)
-            for greenfilling_variant in ["greenfilling_carbon", "greenfilling_water"]
+            paired_deltas(run_metrics, variant, baseline_variant)
+            for variant in green_variants(run_metrics, baseline_variant)
         ],
         ignore_index=True,
     )
 
 
+def invalid_footprint_runs(coverage):
+    """Runs whose schedule outlived the intensity trace, so their footprint is void.
+
+    Batsim holds the last trace sample once the trace ends, so these runs were
+    both scored and scheduled against a signal that had stopped varying. The
+    energy, makespan, waiting-time and slowdown metrics are unaffected.
+    """
+    return coverage[~coverage["footprint_is_valid"]]
+
+
+def assert_footprint_validity(coverage):
+    """Raise unless every run finished inside its intensity trace."""
+    invalid = invalid_footprint_runs(coverage)
+    if len(invalid):
+        worst = invalid["makespan_over_trace"].max()
+        raise ValueError(
+            f"{len(invalid)} of {len(coverage)} runs outlive their intensity trace "
+            f"(worst: {worst:.1f}x the trace length). Their footprint metrics are void. "
+            "Fix the schedules or extend the traces, do not reweight the results."
+        )
+
+
 def summarize_paired(paired_comparisons):
-    """Median/min/max of each paired delta, per (workload, greenfilling variant)."""
+    """Median/min/max of each paired delta, per (workload, green variant)."""
     return (
         paired_comparisons[["workload_label"] + DELTA_COLUMNS]
-        .groupby(["workload_label", "greenfilling_variant"], observed=True)
+        .groupby(["workload_label", "green_variant"], observed=True)
         .agg(["median", "min", "max"])
         .round(2)
     )
 
 
+def summarize_by_horizon(paired_comparisons, group_columns=()):
+    """Median improvement over EASY per signal and horizon. Positive means better.
+
+    `group_columns` adds further slicing, e.g. `("regime",)` or `("dataset",)`.
+    """
+    keys = ["signal", "horizon_hours", *group_columns]
+    available = [c for c in IMPROVEMENT_COLUMNS if c in paired_comparisons.columns]
+    summary = (
+        paired_comparisons.groupby(keys, observed=True)[available].median().round(2)
+    )
+    summary.insert(0, "windows", paired_comparisons.groupby(keys, observed=True).size())
+    summary.insert(
+        1,
+        "windows_better_pct",
+        paired_comparisons.groupby(keys, observed=True)["footprint_improvement_pct"]
+        .apply(lambda values: (values > 0).mean() * 100)
+        .round(1),
+    )
+    return summary
+
+
 def summarize_swing_correlations(paired_comparisons):
     """Pearson correlations between signal swing and target-footprint saving."""
-    specs = [
-        (
-            "greenfilling_carbon",
-            "swing_carbon",
-            "total_carbon_footprint_delta_pct",
-        ),
-        (
-            "greenfilling_water",
-            "swing_water",
-            "total_water_footprint_delta_pct",
-        ),
-    ]
     rows = []
-    for variant, swing_column, delta_column in specs:
-        variant_data = paired_comparisons[
-            paired_comparisons["greenfilling_variant"].eq(variant)
-        ]
+    for (signal, horizon), variant_data in paired_comparisons.groupby(
+        ["signal", "horizon_hours"], observed=True
+    ):
         groups = [("pooled", variant_data)] + [
-            (
-                workload,
-                variant_data[variant_data["workload_label"].eq(workload)],
-            )
+            (workload, variant_data[variant_data["workload_label"].eq(workload)])
             for workload in WORKLOAD_ORDER
         ]
         for workload, group in groups:
-            swing = group[swing_column]
-            saving = -group[delta_column]
+            swing = group["target_swing"]
+            saving = group["footprint_improvement_pct"]
             correlation = (
                 swing.corr(saving)
                 if len(group) > 1 and swing.nunique() > 1 and saving.nunique() > 1
@@ -390,7 +771,8 @@ def summarize_swing_correlations(paired_comparisons):
             )
             rows.append(
                 {
-                    "objective": variant.removeprefix("greenfilling_"),
+                    "signal": signal,
+                    "horizon_hours": horizon,
                     "workload_label": workload,
                     "observations": len(group),
                     "pearson_r": correlation,
@@ -401,11 +783,14 @@ def summarize_swing_correlations(paired_comparisons):
 
 # --- Plotting style ----------------------------------------------------------
 
-VARIANT_ORDER = ["greenfilling_carbon", "greenfilling_water"]
-VARIANT_LABELS = {
-    "greenfilling_carbon": "Carbon objective",
-    "greenfilling_water": "Water objective",
-}
+SIGNAL_ORDER = ["carbon", "water"]
+SIGNAL_LABELS = {"carbon": "Carbon objective", "water": "Water objective"}
+SIGNAL_MARKERS = {"carbon": "o", "water": "^"}
+
+# Planning horizons, in hours. Derived from the data by `horizon_order`, with
+# this as the display order for the ones the campaign actually swept.
+HORIZON_LABELS = {6.0: "6 h", 12.0: "12 h", 24.0: "24 h"}
+
 # Workloads are (dataset, regime) pairs. Hatches and marker shapes keep all four
 # distinguishable using only black and white.
 WORKLOAD_ORDER = ["mustang_stress", "mustang_slack", "trinity_stress", "trinity_slack"]
@@ -434,10 +819,15 @@ SEASON_FILLSTYLES = {
     "summer": "left",
     "autumn": "right",
 }
-OBJECTIVE_MARKERS = {
-    "greenfilling_carbon": "o",
-    "greenfilling_water": "^",
-}
+
+
+def horizon_order(data):
+    """Planning horizons present, in hours, ascending."""
+    return sorted(data["horizon_hours"].dropna().unique())
+
+
+def horizon_label(hours):
+    return HORIZON_LABELS.get(hours, f"{hours:g} h")
 
 
 # --- Plotting ----------------------------------------------------------------
@@ -458,117 +848,230 @@ def export_figure(fig, output_dir, stem):
     return pdf_path, png_path
 
 
-def plot_delta_boxes(data, metrics, titles, ylabels, figure_title):
-    fig, axes = plt.subplots(
-        1, len(metrics), figsize=BOX_FIGURE_SIZE, squeeze=False
+def _workload_legend(fig, y=0.5):
+    handles = [
+        Patch(
+            facecolor="white",
+            edgecolor="black",
+            hatch=WORKLOAD_HATCHES[workload],
+            label=WORKLOAD_LABELS[workload],
+        )
+        for workload in WORKLOAD_ORDER
+    ]
+    fig.legend(
+        handles=handles,
+        loc="upper center",
+        ncol=len(WORKLOAD_ORDER),
+        bbox_to_anchor=(0.5, y),
+        frameon=False,
     )
-    axes = axes[0]
 
-    # One box per (objective, workload). Workloads sit side by side within each objective group.
-    group_centers = {variant: 1.0 + index * 2.3 for index, variant in enumerate(VARIANT_ORDER)}
+
+def plot_delta_boxes(data, metrics, titles, ylabels, figure_title, log_scale=()):
+    """Grid of paired-delta boxes: one row per signal, one column per metric.
+
+    Within each panel the x axis is the planning horizon and the four workloads
+    sit side by side, so the horizon trend reads left to right.
+    """
+    horizons = horizon_order(data)
+    fig, axes = plt.subplots(
+        len(SIGNAL_ORDER),
+        len(metrics),
+        figsize=BOX_FIGURE_SIZE,
+        squeeze=False,
+        sharex=True,
+    )
+
+    group_centers = {horizon: 1.0 + index * 2.3 for index, horizon in enumerate(horizons)}
     within_offsets = {
         workload: (position - (len(WORKLOAD_ORDER) - 1) / 2) * 0.42
         for position, workload in enumerate(WORKLOAD_ORDER)
     }
 
-    for ax, metric, title, ylabel in zip(axes, metrics, titles, ylabels):
-        for workload in WORKLOAD_ORDER:
-            positions = [group_centers[variant] + within_offsets[workload] for variant in VARIANT_ORDER]
-            series = [
-                data.loc[
-                    data["greenfilling_variant"].eq(variant) & data["workload_label"].eq(workload),
-                    metric,
-                ].dropna()
-                for variant in VARIANT_ORDER
-            ]
-            box = ax.boxplot(
-                series,
-                positions=positions,
-                widths=0.36,
-                patch_artist=True,
-                showfliers=False,
-                medianprops={"color": "black", "linewidth": 1.4},
-            )
-            for patch in box["boxes"]:
-                patch.set_facecolor("white")
-                patch.set_edgecolor("black")
-                patch.set_hatch(WORKLOAD_HATCHES[workload])
-
-            for position, values in zip(positions, series):
-                offsets = np.linspace(-0.08, 0.08, len(values)) if len(values) else []
-                ax.scatter(
-                    position + offsets,
-                    values,
-                    s=BOX_POINT_AREA,
-                    alpha=0.75,
-                    marker="o",
-                    facecolor="white",
-                    edgecolor="black",
-                    linewidth=0.3,
-                    zorder=3,
+    for row, signal in enumerate(SIGNAL_ORDER):
+        signal_data = data[data["signal"].eq(signal)]
+        for column, (metric, title, ylabel) in enumerate(zip(metrics, titles, ylabels)):
+            ax = axes[row][column]
+            for workload in WORKLOAD_ORDER:
+                positions = [group_centers[horizon] + within_offsets[workload] for horizon in horizons]
+                series = [
+                    signal_data.loc[
+                        signal_data["horizon_hours"].eq(horizon)
+                        & signal_data["workload_label"].eq(workload),
+                        metric,
+                    ].dropna()
+                    for horizon in horizons
+                ]
+                box = ax.boxplot(
+                    series,
+                    positions=positions,
+                    widths=0.36,
+                    patch_artist=True,
+                    showfliers=False,
+                    medianprops={"color": "black", "linewidth": 1.4},
                 )
+                for patch in box["boxes"]:
+                    patch.set_facecolor("white")
+                    patch.set_edgecolor("black")
+                    patch.set_hatch(WORKLOAD_HATCHES[workload])
 
-        ax.axhline(0, color="black", linewidth=0.9)
-        ax.set_title(title)
-        ax.set_ylabel(ylabel)
-        ax.set_xticks([group_centers[variant] for variant in VARIANT_ORDER])
-        ax.set_xticklabels([VARIANT_LABELS[variant] for variant in VARIANT_ORDER])
-        ax.set_xlim(
-            group_centers[VARIANT_ORDER[0]] - 0.95,
-            group_centers[VARIANT_ORDER[-1]] + 0.95,
-        )
+            ax.axhline(0, color="black", linewidth=0.9)
+            if metric in log_scale:
+                ax.set_yscale("symlog")
+            if row == 0:
+                ax.set_title(title)
+            if column == 0:
+                ax.set_ylabel(f"{SIGNAL_LABELS[signal]}\n{ylabel}")
+            ax.set_xticks([group_centers[horizon] for horizon in horizons])
+            ax.set_xticklabels([horizon_label(horizon) for horizon in horizons])
+            ax.set_xlim(
+                group_centers[horizons[0]] - 0.95,
+                group_centers[horizons[-1]] + 0.95,
+            )
 
-    workload_handles = [
-        Patch(facecolor="white", edgecolor="black", hatch=WORKLOAD_HATCHES[workload], label=WORKLOAD_LABELS[workload])
-        for workload in WORKLOAD_ORDER
-    ]
-    fig.legend(handles=workload_handles, loc="upper center", ncol=len(WORKLOAD_ORDER), bbox_to_anchor=(0.5, 0.89), frameon=False)
-    fig.suptitle(figure_title, y=0.98)
-    fig.tight_layout(rect=(0, 0, 1, 0.82), pad=0.3, w_pad=0.5)
+    _workload_legend(fig, y=0.955)
+    fig.suptitle(figure_title, y=0.995)
+    fig.supxlabel("Planning horizon", y=0.01)
+    fig.tight_layout(rect=(0, 0.03, 1, 0.90), pad=0.3, w_pad=0.5, h_pad=0.5)
     return fig, axes
 
 
-def plot_deltas_vs_easy(data):
-    """Footprint and bounded-slowdown deltas versus EASY, per sampled window."""
+def plot_improvement_vs_easy(data):
+    """Did green beat EASY. Positive is better on every panel."""
     return plot_delta_boxes(
         data,
         [
-            "total_carbon_footprint_delta_pct",
-            "total_water_footprint_delta_pct",
-            "replay_mean_bounded_slowdown_delta_pct",
+            "footprint_improvement_pct",
+            "energy_improvement_pct",
+            "slowdown_improvement_pct",
         ],
-        ["Carbon footprint", "Water footprint", "Average bounded slowdown"],
-        [r"$\Delta$ [% vs EASY]"] * 3,
-        r"Footprint and performance $\Delta$ by sampled window",
+        ["Target footprint", "Energy", "Bounded slowdown"],
+        ["Improvement [% vs EASY]"] * 3,
+        "Improvement over EASY by planning horizon (positive is better)",
     )
 
 
-def plot_energy_exposure_deltas(data):
-    """Energy and effective operational intensity deltas versus EASY."""
+def plot_cost_vs_easy(data):
+    """What displacement cost. Positive is better on every panel."""
     return plot_delta_boxes(
         data,
         [
-            "consumed_energy_kwh_delta_pct",
-            "energy_weighted_carbon_intensity_delta_pct",
-            "energy_weighted_water_intensity_delta_pct",
+            "makespan_improvement_pct",
+            "utilisation_improvement_pct",
         ],
-        ["Consumed energy", "Effective carbon intensity", "Effective water intensity"],
-        [r"$\Delta$ [% vs EASY]"] * 3,
-        "Energy and intensity exposure deltas by sampled window",
+        ["Makespan", "Node utilisation"],
+        ["Improvement [% vs EASY]"] * 2,
+        "Scheduling cost against EASY by planning horizon (positive is better)",
     )
 
 
-def plot_tradeoff_scatter(data, environmental_delta_column, x_label, title):
-    plot_data = data.copy()
-    plot_data["environmental_saving_pct"] = -plot_data[environmental_delta_column]
-    plot_data["bounded_slowdown_penalty_pct"] = plot_data[
-        "replay_mean_bounded_slowdown_delta_pct"
+def plot_intensity_decomposition(data):
+    """Where the footprint change comes from: compute placement versus idle.
+
+    Displacement moves compute out of dirty hours and leaves idle sitting in
+    them, so the compute and idle lines usually pull in opposite directions and
+    the platform line is their energy-weighted blend.
+    """
+    horizons = horizon_order(data)
+    series = [
+        ("compute_intensity_improvement_pct", "Compute", "o", "-"),
+        ("idle_intensity_improvement_pct", "Idle", "s", "--"),
+        ("platform_intensity_improvement_pct", "Platform", "^", ":"),
     ]
 
-    zones = sorted(plot_data["zone"].unique())
+    fig, axes = plt.subplots(
+        len(SIGNAL_ORDER), len(WORKLOAD_ORDER),
+        figsize=TREND_FIGURE_SIZE, squeeze=False, sharex=True,
+    )
+    for row, signal in enumerate(SIGNAL_ORDER):
+        signal_data = data[data["signal"].eq(signal)]
+        for column, workload in enumerate(WORKLOAD_ORDER):
+            ax = axes[row][column]
+            subset = signal_data[signal_data["workload_label"].eq(workload)]
+            for metric, label, marker, style in series:
+                medians = [
+                    subset.loc[subset["horizon_hours"].eq(horizon), metric].median()
+                    for horizon in horizons
+                ]
+                ax.plot(horizons, medians, color="black", marker=marker,
+                        linestyle=style, markersize=DATA_MARKER_SIZE, linewidth=1.0,
+                        markerfacecolor="white", label=label)
+            ax.axhline(0, color="black", linewidth=0.9)
+            ax.set_xticks(horizons)
+            ax.set_xticklabels([horizon_label(horizon) for horizon in horizons])
+            if row == 0:
+                ax.set_title(WORKLOAD_LABELS[workload])
+            if column == 0:
+                ax.set_ylabel(f"{SIGNAL_LABELS[signal]}\nimprovement [%]")
+
+    handles = [
+        Line2D([0], [0], color="black", marker=marker, linestyle=style,
+               markerfacecolor="white", markersize=LEGEND_MARKER_SIZE, label=label)
+        for _, label, marker, style in series
+    ]
+    fig.legend(handles=handles, loc="upper center", ncol=3,
+               bbox_to_anchor=(0.5, 0.955), frameon=False)
+    fig.suptitle("Intensity improvement over EASY, by phase", y=0.998)
+    fig.supxlabel("Planning horizon", y=0.01)
+    fig.tight_layout(rect=(0.01, 0.03, 1, 0.88), pad=0.3, w_pad=0.6, h_pad=0.5)
+    return fig, axes
+
+
+def plot_trace_coverage(coverage):
+    """How far each variant's schedule runs past the end of the intensity trace.
+
+    Beyond `makespan_over_trace = 1` the intensity signal is frozen at its last
+    sample, so footprint accrued there is not scored against a real trace.
+    """
+    variants = [variant for variant in coverage["variant"].unique() if variant != "easy_bf"]
+    variants = sorted(variants, key=lambda name: (name.split("_")[-2], int(name.split("_")[-1])))
+    order = ["easy_bf"] + variants
+
+    fig, axes = plt.subplots(1, 2, figsize=COVERAGE_FIGURE_SIZE, squeeze=False)
+    axes = axes[0]
+    panels = [
+        ("makespan_over_trace", "Makespan / trace length", True),
+        ("tail_carbon_share_pct", "Carbon accrued past trace end [%]", False),
+    ]
+    positions = range(1, len(order) + 1)
+    for ax, (metric, ylabel, log) in zip(axes, panels):
+        series = [coverage.loc[coverage["variant"].eq(variant), metric].dropna() for variant in order]
+        box = ax.boxplot(series, positions=list(positions), widths=0.6,
+                         patch_artist=True, showfliers=False,
+                         medianprops={"color": "black", "linewidth": 1.4})
+        for patch in box["boxes"]:
+            patch.set_facecolor("white")
+            patch.set_edgecolor("black")
+        if log:
+            ax.set_yscale("log")
+            ax.axhline(1, color="black", linewidth=0.9, linestyle="--")
+        ax.set_ylabel(ylabel)
+        ax.set_xticks(list(positions))
+        ax.set_xticklabels(
+            ["EASY"] + [f"{v.split('_')[-2][:1].upper()}{int(v.split('_')[-1])//3600}h" for v in variants],
+            rotation=45, ha="right",
+        )
+    fig.suptitle("Schedules run far past the end of the intensity trace", y=0.99)
+    fig.tight_layout(rect=(0, 0, 1, 0.92), pad=0.3, w_pad=0.5)
+    return fig, axes
+
+
+def plot_tradeoff_scatter(data, improvement_column, x_label, title):
+    """Environmental saving against bounded-slowdown penalty, per window.
+
+    Rows are workloads, columns are planning horizons, marker shape is the
+    signal and fill style is the season.
+    """
+    plot_data = data.copy()
+    plot_data["environmental_saving_pct"] = plot_data[improvement_column]
+    plot_data["bounded_slowdown_penalty_pct"] = plot_data[
+        "slowdown_improvement_pct"
+    ]
+
+    horizons = horizon_order(plot_data)
     fig, axes = plt.subplots(
         len(WORKLOAD_ORDER),
-        len(zones),
+        len(horizons),
         figsize=TRADEOFF_FIGURE_SIZE,
         sharex=True,
         sharey=True,
@@ -576,23 +1079,23 @@ def plot_tradeoff_scatter(data, environmental_delta_column, x_label, title):
     )
 
     x_values = plot_data["environmental_saving_pct"]
-    y_values = plot_data["bounded_slowdown_penalty_pct"]
     x_padding = max((x_values.max() - x_values.min()) * 0.12, 0.25)
-    y_padding = max((y_values.max() - y_values.min()) * 0.12, 1.0)
 
     for row, workload in enumerate(WORKLOAD_ORDER):
         workload_data = plot_data[plot_data["workload_label"].eq(workload)]
-        for ax, zone in zip(axes[row], zones):
-            zone_data = workload_data[workload_data["zone"].eq(zone)]
-            for variant in VARIANT_ORDER:
-                variant_data = zone_data[zone_data["greenfilling_variant"].eq(variant)]
+        for ax, horizon in zip(axes[row], horizons):
+            horizon_data = workload_data[workload_data["horizon_hours"].eq(horizon)]
+            for signal in SIGNAL_ORDER:
+                signal_data = horizon_data[horizon_data["signal"].eq(signal)]
                 for season in SEASON_ORDER:
-                    points = variant_data[variant_data["season"].eq(season)]
+                    points = signal_data[signal_data["season"].eq(season)]
                     ax.plot(
                         points["environmental_saving_pct"],
                         points["bounded_slowdown_penalty_pct"],
                         linestyle="",
-                        marker=monochrome_marker(OBJECTIVE_MARKERS[variant], SEASON_FILLSTYLES[season]),
+                        marker=monochrome_marker(
+                            SIGNAL_MARKERS[signal], SEASON_FILLSTYLES[season]
+                        ),
                         color="black",
                         markerfacecolor="black",
                         markerfacecoloralt="white",
@@ -603,93 +1106,259 @@ def plot_tradeoff_scatter(data, environmental_delta_column, x_label, title):
                     )
 
             ax.axvline(0, color="black", linewidth=0.9)
-            ax.axhline(0, color="black", linewidth=0.9)
-            ax.set_title(f"{WORKLOAD_LABELS[workload]} - {zone}")
+            ax.set_yscale("symlog")
+            ax.set_title(f"{WORKLOAD_LABELS[workload]} - {horizon_label(horizon)}")
             ax.set_xlim(x_values.min() - x_padding, x_values.max() + x_padding)
-            ax.set_ylim(min(0, y_values.min() - y_padding), y_values.max() + y_padding)
 
     season_handles = [
-        Line2D([0], [0], marker=monochrome_marker("o", SEASON_FILLSTYLES[season]), linestyle="", markerfacecolor="black", markerfacecoloralt="white", markeredgecolor="black", color="black", label=season.title(), markersize=LEGEND_MARKER_SIZE)
+        Line2D([0], [0], marker=monochrome_marker("o", SEASON_FILLSTYLES[season]), linestyle="",
+               markerfacecolor="black", markerfacecoloralt="white", markeredgecolor="black",
+               color="black", label=season.title(), markersize=LEGEND_MARKER_SIZE)
         for season in SEASON_ORDER
     ]
-    objective_handles = [
-        Line2D(
-            [0],
-            [0],
-            marker=OBJECTIVE_MARKERS[variant],
-            linestyle="",
-            color="black",
-            label=VARIANT_LABELS[variant],
-            markersize=LEGEND_MARKER_SIZE,
-        )
-        for variant in VARIANT_ORDER
+    signal_handles = [
+        Line2D([0], [0], marker=SIGNAL_MARKERS[signal], linestyle="", color="black",
+               label=SIGNAL_LABELS[signal], markersize=LEGEND_MARKER_SIZE)
+        for signal in SIGNAL_ORDER
     ]
 
-    fig.legend(handles=season_handles, loc="upper center", ncol=4, bbox_to_anchor=(0.5, 0.965), frameon=False)
-    fig.legend(handles=objective_handles, loc="upper center", ncol=2, bbox_to_anchor=(0.5, 0.935), frameon=False)
+    fig.legend(handles=season_handles, loc="upper center", ncol=4,
+               bbox_to_anchor=(0.5, 0.965), frameon=False)
+    fig.legend(handles=signal_handles, loc="upper center", ncol=2,
+               bbox_to_anchor=(0.5, 0.935), frameon=False)
     fig.suptitle(title, y=0.995)
     fig.supxlabel(x_label, y=0.01)
-    fig.supylabel("Average bounded slowdown penalty [% vs EASY]", x=0.005)
+    fig.supylabel("Bounded slowdown improvement [% vs EASY]", x=0.005)
     fig.tight_layout(rect=(0.04, 0.04, 1, 0.905), pad=0.3, w_pad=0.4, h_pad=0.5)
     return fig, axes
 
 
 def plot_swing_relationship(data):
-    specs = [
-        ("greenfilling_carbon", "swing_carbon", "total_carbon_footprint_delta_pct", "Carbon objective", "Carbon swing"),
-        ("greenfilling_water", "swing_water", "total_water_footprint_delta_pct", "Water objective", "Water swing"),
-    ]
+    """Intra-day swing of the target signal against the saving it produced."""
+    horizons = horizon_order(data)
+    fig, axes = plt.subplots(
+        len(SIGNAL_ORDER), len(horizons), figsize=SWING_FIGURE_SIZE,
+        squeeze=False, sharex=True, sharey=True,
+    )
 
-    fig, axes = plt.subplots(1, len(specs), figsize=SWING_FIGURE_SIZE, squeeze=False)
-    axes = axes[0]
+    for row, signal in enumerate(SIGNAL_ORDER):
+        signal_data = data[data["signal"].eq(signal)]
+        for ax, horizon in zip(axes[row], horizons):
+            cell = signal_data[signal_data["horizon_hours"].eq(horizon)]
+            for workload in WORKLOAD_ORDER:
+                subset = cell[cell["workload_label"].eq(workload)]
+                for season in SEASON_ORDER:
+                    points = subset[subset["season"].eq(season)]
+                    ax.plot(
+                        points["target_swing"],
+                        points["footprint_improvement_pct"],
+                        linestyle="",
+                        color="black",
+                        marker=monochrome_marker(
+                            WORKLOAD_MARKERS[workload], SEASON_FILLSTYLES[season]
+                        ),
+                        markerfacecolor="black",
+                        markerfacecoloralt="white",
+                        markeredgecolor="black",
+                        markeredgewidth=0.7,
+                        markersize=DATA_MARKER_SIZE,
+                        alpha=0.85,
+                    )
 
-    for ax, (variant, swing_column, delta_column, title, x_label) in zip(axes, specs):
-        variant_data = data[data["greenfilling_variant"].eq(variant)]
+            swing = cell["target_swing"].to_numpy()
+            saving = cell["footprint_improvement_pct"].to_numpy()
+            if len(swing) > 1:
+                slope, intercept = np.polyfit(swing, saving, 1)
+                grid = np.linspace(swing.min(), swing.max(), 50)
+                ax.plot(grid, slope * grid + intercept, color="black", linestyle="-",
+                        marker="", linewidth=1.1)
+                r = np.corrcoef(swing, saving)[0, 1]
+                ax.set_title(f"{SIGNAL_LABELS[signal]}, {horizon_label(horizon)} (r = {r:.2f})")
+            else:
+                ax.set_title(f"{SIGNAL_LABELS[signal]}, {horizon_label(horizon)}")
 
-        for workload in WORKLOAD_ORDER:
-            subset = variant_data[variant_data["workload_label"].eq(workload)]
-            for season in SEASON_ORDER:
-                points = subset[subset["season"].eq(season)]
-                ax.plot(
-                    points[swing_column],
-                    -points[delta_column],
-                    linestyle="",
-                    color="black",
-                    marker=monochrome_marker(WORKLOAD_MARKERS[workload], SEASON_FILLSTYLES[season]),
-                    markerfacecolor="black",
-                    markerfacecoloralt="white",
-                    markeredgecolor="black",
-                    markeredgewidth=0.7,
-                    markersize=DATA_MARKER_SIZE,
-                    alpha=0.85,
-                )
+            ax.axhline(0, color="black", linewidth=0.9)
 
-        # Fit and correlation over all workload scenarios pooled.
-        swing = variant_data[swing_column].to_numpy()
-        saving = -variant_data[delta_column].to_numpy()  # positive = footprint reduction vs EASY
-        if len(swing) > 1:
-            slope, intercept = np.polyfit(swing, saving, 1)
-            grid = np.linspace(swing.min(), swing.max(), 50)
-            ax.plot(grid, slope * grid + intercept, color="black", linestyle="-", marker="", linewidth=1.1)
-            r = np.corrcoef(swing, saving)[0, 1]
-            ax.set_title(f"{title}  (r = {r:.2f})")
-        else:
-            ax.set_title(title)
-
-        ax.axhline(0, color="black", linewidth=0.9)
-        ax.set_xlabel(x_label)
-        ax.set_ylabel("Footprint saving [% vs EASY]")
-
-    season_handles = [
-        Line2D([0], [0], marker=monochrome_marker("o", SEASON_FILLSTYLES[season]), linestyle="", markerfacecolor="black", markerfacecoloralt="white", markeredgecolor="black", color="black", label=season.title(), markersize=LEGEND_MARKER_SIZE)
-        for season in SEASON_ORDER
-    ]
     workload_handles = [
-        Line2D([0], [0], marker=WORKLOAD_MARKERS[workload], linestyle="", color="black", label=WORKLOAD_LABELS[workload], markersize=LEGEND_MARKER_SIZE)
+        Line2D([0], [0], marker=WORKLOAD_MARKERS[workload], linestyle="", color="black",
+               label=WORKLOAD_LABELS[workload], markersize=LEGEND_MARKER_SIZE)
         for workload in WORKLOAD_ORDER
     ]
-    fig.legend(handles=season_handles, loc="upper center", ncol=4, bbox_to_anchor=(0.5, 0.91), frameon=False)
-    fig.legend(handles=workload_handles, loc="lower center", ncol=2, bbox_to_anchor=(0.5, 0.01), frameon=False)
-    fig.suptitle("Intra-day swing versus greenfilling footprint saving", y=0.98)
-    fig.tight_layout(rect=(0, 0.12, 1, 0.85), pad=0.3, w_pad=0.5)
+    fig.legend(handles=workload_handles, loc="lower center", ncol=4,
+               bbox_to_anchor=(0.5, 0.01), frameon=False)
+    fig.suptitle("Intra-day swing versus footprint improvement", y=0.98)
+    fig.supxlabel("Intra-day swing of the target signal", y=0.10)
+    fig.supylabel("Footprint improvement [% vs EASY]", x=0.005)
+    fig.tight_layout(rect=(0.03, 0.14, 1, 0.93), pad=0.3, w_pad=0.5, h_pad=0.6)
     return fig, axes
+
+
+# --- Comparison against the offline shifting ceiling -------------------------
+
+def aggregate_saving_pct(frame, keys, baseline_column, achieved_column):
+    """Saving as a ratio of summed footprints, the estimator the ceiling uses.
+
+    A median of per-window percentages weights a tiny window the same as a huge
+    one. Summing first keeps the two analyses on the same estimator.
+    """
+    # dropna=False keeps the EASY baseline, which has no planning horizon.
+    totals = frame.groupby(keys, observed=True, dropna=False)[
+        [baseline_column, achieved_column]
+    ].sum()
+    totals["saving_pct"] = (
+        100.0
+        * (totals[baseline_column] - totals[achieved_column])
+        / totals[baseline_column]
+    )
+    return totals
+
+
+def build_ceiling_costs(jobs):
+    """Per run: the shifting-ceiling cost function evaluated on achieved starts.
+
+    Reuses `shift_ceiling_results` so the expression is identical to the offline
+    bound: non-context jobs only, submission time as the release date, and each
+    job charged on its own nodes at compute power while it runs and at idle
+    power while it waits. `baseline_*` puts every job at its submission instant,
+    which is exactly the ceiling's own baseline, so the savings are comparable.
+
+    This deliberately ignores platform-wide idle, which the ceiling cannot model.
+    """
+    import shift_ceiling_results as scr
+
+    replay = jobs[jobs["job_kind"].eq("replay")]
+    traces, prefixes = {}, {}
+    for row in scr.load_windows().itertuples():
+        key = (str(row.zone), str(row.start_date))
+        trace = scr.load_trace(row)
+        traces[key] = trace
+        prefixes[key] = (
+            scr.prefix_integral(trace.carbon),
+            scr.prefix_integral(trace.water),
+        )
+
+    platforms = {}
+    rows = []
+    for name, group in replay.groupby("name", observed=True):
+        key = (str(group["zone"].iloc[0]), str(group["start_date"].iloc[0]))
+        dataset = str(group["dataset"].iloc[0])
+        platform = platforms.setdefault(dataset, scr.load_platform(dataset))
+        trace = traces[key]
+        carbon_prefix, water_prefix = prefixes[key]
+
+        submission = group["submission_time"].to_numpy(dtype=float)
+        execution = group["execution_time"].to_numpy(dtype=float)
+        nodes = group["requested_number_of_resources"].to_numpy(dtype=float)
+        achieved = group["starting_time"].to_numpy(dtype=float)
+
+        record = {"name": name}
+        for label, starts in [("baseline", submission), ("achieved", achieved)]:
+            at_submission_c = scr.integral_at(submission, trace.carbon, carbon_prefix)
+            at_start_c = scr.integral_at(starts, trace.carbon, carbon_prefix)
+            at_finish_c = scr.integral_at(starts + execution, trace.carbon, carbon_prefix)
+            at_submission_w = scr.integral_at(submission, trace.water, water_prefix)
+            at_start_w = scr.integral_at(starts, trace.water, water_prefix)
+            at_finish_w = scr.integral_at(starts + execution, trace.water, water_prefix)
+            record[f"{label}_carbon"] = float(
+                np.sum(
+                    nodes
+                    * (
+                        platform.compute_power_w * (at_finish_c - at_start_c)
+                        + platform.idle_power_w * (at_start_c - at_submission_c)
+                    )
+                )
+                / 1_000_000.0
+            )
+            record[f"{label}_water"] = float(
+                np.sum(
+                    nodes
+                    * (
+                        platform.compute_power_w * (at_finish_w - at_start_w)
+                        + platform.idle_power_w * (at_start_w - at_submission_w)
+                    )
+                )
+                / 1_000.0
+            )
+        rows.append(record)
+
+    return pd.DataFrame(rows)
+
+
+def summarize_ceiling_capture(ceiling_costs, run_metrics):
+    """Ceiling-comparable saving per variant, signal and horizon.
+
+    Positive means the schedule beat the "every job starts at submission"
+    baseline that the offline bound uses. EASY usually scores negative, because
+    that baseline assumes no queueing at all.
+    """
+    metrics = run_metrics[
+        ["name", "variant", "objective", "horizon_seconds", "workload_label"]
+    ]
+    costs = ceiling_costs.merge(metrics, on="name", validate="one_to_one")
+    costs["horizon_hours"] = (
+        pd.to_numeric(costs["horizon_seconds"], errors="coerce") / 3600
+    )
+    # EASY displaces nothing, so it belongs against the bound at d_m = 0, where
+    # the ceiling saving is 0 by construction. Its score is then pure queueing cost.
+    costs.loc[costs["objective"].eq("baseline"), "horizon_hours"] = 0.0
+
+    frames = []
+    for signal in SIGNAL_ORDER:
+        # The baseline runs on no signal, so report it against both.
+        subset = costs[costs["objective"].isin([signal, "baseline"])].copy()
+        subset["signal"] = signal
+        table = aggregate_saving_pct(
+            subset,
+            ["signal", "variant", "horizon_hours"],
+            f"baseline_{signal}",
+            f"achieved_{signal}",
+        )
+        frames.append(table)
+    return pd.concat(frames)[["saving_pct"]].round(2)
+
+
+def load_ceiling_bound(results_path):
+    """The offline bound as ratio-of-sums saving per signal and horizon.
+
+    Returns None when `shift_ceiling_results.csv.gz` has not been generated.
+    """
+    results_path = Path(results_path)
+    if not results_path.exists():
+        return None
+
+    import shift_ceiling_analysis as sca
+
+    analysis = sca.load_results(results_path)
+    bound = aggregate_saving_pct(
+        analysis.pair_summary,
+        ["signal", "d_m_seconds"],
+        "baseline",
+        "shifted",
+    ).reset_index()
+    bound["horizon_hours"] = bound["d_m_seconds"] / 3600
+    return bound[["signal", "horizon_hours", "saving_pct"]].round(2)
+
+
+def compare_with_ceiling(ceiling_costs, run_metrics, results_path):
+    """Achieved saving beside the offline bound, on one estimator and one scale."""
+    achieved = summarize_ceiling_capture(ceiling_costs, run_metrics).reset_index()
+    bound = load_ceiling_bound(results_path)
+    if bound is None:
+        return achieved
+
+    merged = achieved.merge(
+        bound.rename(columns={"saving_pct": "ceiling_saving_pct"}),
+        on=["signal", "horizon_hours"],
+        how="left",
+    )
+    # Percentage points short of the bound. A ratio would be meaningless here,
+    # since a schedule that loses to its own baseline has a negative saving.
+    merged["gap_to_ceiling_pp"] = (
+        merged["ceiling_saving_pct"] - merged["saving_pct"]
+    ).round(2)
+    merged["captured_pct_of_ceiling"] = np.where(
+        merged["saving_pct"] > 0,
+        merged["saving_pct"] / merged["ceiling_saving_pct"] * 100,
+        np.nan,
+    ).round(1)
+    return merged
