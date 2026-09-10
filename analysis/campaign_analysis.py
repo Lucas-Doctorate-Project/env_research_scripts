@@ -517,6 +517,54 @@ def build_run_metrics(schedules, job_metrics, jobs=None):
     )
 
 
+def summarize_phase_exposure(run_metrics):
+    """Compute/idle exposure by workload and variant, including EASY once.
+
+    Amounts are per-run means; shares are ratios of sums across windows.
+    Machine times are node-seconds, not elapsed schedule durations.
+    Assumes always-on nodes: exported idle counters omit final idle intervals,
+    so idle time is capacity-time minus computing time through the makespan.
+    """
+    run_metrics = run_metrics.copy()
+    run_metrics["time_idle"] = (
+        run_metrics["makespan"] * run_metrics["nb_computing_machines"]
+        - run_metrics["time_computing"]
+    )
+    keys = ["workload_label", "variant"]
+    columns = [
+        "time_computing", "time_idle", "compute_energy_kwh", "idle_energy_kwh",
+        "compute_carbon", "total_carbon_operational",
+        "compute_water", "total_water_offsite",
+    ]
+    grouped = run_metrics.groupby(keys, observed=True)
+    totals = grouped[columns].sum()
+    runs = grouped.size()
+    phases = []
+    for phase, time_column in [("Compute", "time_computing"), ("Idle", "time_idle")]:
+        compute = phase == "Compute"
+        energy = totals["compute_energy_kwh" if compute else "idle_energy_kwh"]
+        frame = pd.DataFrame(index=totals.index)
+        frame["phase"] = phase
+        frame["runs"] = runs
+        frame["node_hours_per_run"] = totals[time_column] / runs / 3600
+        frame["node_time_share_pct"] = 100 * totals[time_column] / (
+            totals["time_computing"] + totals["time_idle"]
+        )
+        frame["energy_kwh_per_run"] = energy / runs
+        frame["energy_share_pct"] = 100 * energy / (
+            totals["compute_energy_kwh"] + totals["idle_energy_kwh"]
+        )
+        for signal, total_column in [
+            ("carbon", "total_carbon_operational"), ("water", "total_water_offsite")
+        ]:
+            footprint = totals[f"compute_{signal}"]
+            if not compute:
+                footprint = totals[total_column] - footprint
+            frame[f"{signal}_share_pct"] = 100 * footprint / totals[total_column]
+        phases.append(frame.reset_index())
+    return pd.concat(phases, ignore_index=True).set_index(keys + ["phase"]).sort_index()
+
+
 def build_deferral_diagnostics(jobs, run_metrics):
     """Per run: how job waiting times compare with the scheduler's own horizon.
 
@@ -965,12 +1013,73 @@ def plot_cost_vs_easy(data):
     )
 
 
+def plot_phase_exposure(run_metrics):
+    """Distributions of per-run compute/idle shares by workload and variant."""
+    data = run_metrics.copy()
+    capacity_time = data["makespan"] * data["nb_computing_machines"]
+    data["compute_time_share_pct"] = 100 * data["time_computing"] / capacity_time
+    data["idle_time_share_pct"] = 100 - data["compute_time_share_pct"]
+    data["compute_energy_share_pct"] = 100 * data["compute_energy_share"]
+    data["idle_energy_share_pct"] = 100 - data["compute_energy_share_pct"]
+    green = data.loc[data["variant"].ne("easy_bf")].sort_values(
+        ["objective", "horizon_seconds"]
+    ).drop_duplicates("variant")
+    variants = ["easy_bf"] + green["variant"].tolist()
+    labels = ["EASY"] + [
+        f"{row.objective[0].upper()}{row.horizon_seconds / 3600:g}h"
+        for row in green.itertuples()
+    ]
+    panels = [("compute", "time", "Compute node-time [%]"),
+              ("idle", "time", "Idle node-time [%]"),
+              ("compute", "energy", "Compute energy [%]"),
+              ("idle", "energy", "Idle energy [%]")]
+    fig, axes = plt.subplots(len(panels), len(WORKLOAD_ORDER), figsize=(11, 9),
+                             squeeze=False, sharex=True)
+    for column, workload in enumerate(WORKLOAD_ORDER):
+        subset = data.loc[data["workload_label"].eq(workload)]
+        for row, (phase, measure, ylabel) in enumerate(panels):
+            ax = axes[row, column]
+            values = [subset.loc[subset["variant"].eq(variant),
+                                 f"{phase}_{measure}_share_pct"].dropna()
+                      for variant in variants]
+            boxes = ax.boxplot(values, positions=np.arange(len(variants)),
+                               widths=0.55, patch_artist=True, showfliers=True,
+                               medianprops={"color": "black", "linewidth": 1.2},
+                               flierprops={"marker": ".", "markersize": 2,
+                                           "markeredgecolor": "black"})
+            for box in boxes["boxes"]:
+                box.set_facecolor("0.75" if phase == "compute" else "white")
+            # Zoom each workload/phase to its full observed range, including
+            # outliers. A small minimum span avoids magnifying numerical noise.
+            observed = np.concatenate([v.to_numpy() for v in values])
+            low, high = observed.min(), observed.max()
+            span = max(high - low, 0.2)
+            midpoint = (low + high) / 2
+            ax.set_ylim(max(0, midpoint - span * 0.65),
+                        min(100, midpoint + span * 0.65))
+            ax.yaxis.set_major_locator(plt.MaxNLocator(nbins=4))
+            ax.ticklabel_format(axis="y", style="plain", useOffset=False)
+            ax.set_xticks(range(len(variants)), labels, rotation=90, ha="right")
+            ax.set_xlim(-0.6, len(variants) - 0.4)
+            ax.grid(axis="x", visible=False)
+            if row == 0:
+                ax.set_title(WORKLOAD_LABELS[workload])
+            if column == 0:
+                ax.set_ylabel(ylabel)
+    fig.suptitle("Compute and idle exposure across environmental windows", y=0.995)
+    fig.supxlabel("Scheduler variant: C = carbon objective; W = water objective; h = horizon hours",
+                  y=0.01)
+    fig.tight_layout(rect=(0, 0.025, 1, 0.97), h_pad=1.0, w_pad=1.0)
+    return fig, axes
+
+
 def plot_intensity_decomposition(data):
     """Where the footprint change comes from: compute placement versus idle.
 
     Displacement moves compute out of dirty hours and leaves idle sitting in
     them, so the compute and idle lines usually pull in opposite directions and
-    the platform line is their energy-weighted blend.
+    platform intensity is their energy-weighted blend. Percentage improvements
+    themselves do not obey that blend when energy shares change.
     """
     horizons = horizon_order(data)
     series = [
@@ -997,6 +1106,8 @@ def plot_intensity_decomposition(data):
                         linestyle=style, markersize=DATA_MARKER_SIZE, linewidth=1.0,
                         markerfacecolor="white", label=label)
             ax.axhline(0, color="black", linewidth=0.9)
+            ax.set_yscale("symlog", linthresh=0.1)
+            ax.margins(y=0.12)
             ax.set_xticks(horizons)
             ax.set_xticklabels([horizon_label(horizon) for horizon in horizons])
             if row == 0:
@@ -1049,9 +1160,9 @@ def plot_trace_coverage(coverage):
         ax.set_xticks(list(positions))
         ax.set_xticklabels(
             ["EASY"] + [f"{v.split('_')[-2][:1].upper()}{int(v.split('_')[-1])//3600}h" for v in variants],
-            rotation=45, ha="right",
+            rotation=90, ha="right",
         )
-    fig.suptitle("Schedules run far past the end of the intensity trace", y=0.99)
+    fig.suptitle("Trace coverage of completed schedules", y=0.99)
     fig.tight_layout(rect=(0, 0, 1, 0.92), pad=0.3, w_pad=0.5)
     return fig, axes
 
